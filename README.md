@@ -2,8 +2,7 @@
 
 [![Bash Version](https://img.shields.io/badge/bash-5.1-blue.svg)](https://www.gnu.org/software/bash/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Last Commit](https://img.shields.io/github/last-commit/titithen00b/repo.svg)](https://github.com/titithen00b/repo/backup_borg/main)
-
+[![Last Commit](https://img.shields.io/github/last-commit/titithen00b/repo.svg)](https://github.com/titithen00b/backup_borg/commits/main)
 ---
 
 ## Table des matières
