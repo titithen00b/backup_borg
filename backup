@@ -1,0 +1,323 @@
+#!/bin/bash
+set -euo pipefail
+
+# Définition des variables par défaut
+SHOW_HELP=false
+
+# Informations pour la sauvegarde
+SOURCE_DIR="/"  # Répertoire source à sauvegarder
+DEST_DIR="/var/backup"  # Répertoire où seront stockées les sauvegardes
+MOUNT_POINT="/var/backup"
+NAS_SERVER=""
+CONFIG_FILE="/etc/backup_script/smb.conf"  # Nom du fichier de configuration chiffré
+BORG_PASSPHRASE="$(cat /etc/backup_script/borg_pass)"
+export BORG_PASSPHRASE
+DOCKER="1" # Sauvegarde Docker a faire. 0 si aucune sauvegarde a faire 
+BACKUP_DOCKER="/var/backups/docker/" # Répertoire des sauvegardes Docker 
+NAME_FOR_NOTIFY=""
+
+
+# Informations pour l'envoi de SMS via la passerelle Free SMS
+FREE_MOBILE_USER=""
+FREE_MOBILE_CODE_AUTH=""
+PHONE_NUMBER=""
+
+# Initialiser des variables d'état de la sauvegarde
+backup_success="0"
+mount_success="0"
+umount_success="0"
+backup_docker="0"
+error="0"
+error_docker="0"
+EXCLUDE=""
+
+# Analyse des options de ligne de commande
+while getopts ":h?" opt; do
+    case $opt in
+        h|\?)
+            SHOW_HELP=true
+            ;;
+    esac
+done
+
+# Fonction pour enregistrer des logs dans un fichier
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> /var/log/backup.log
+}
+
+# Fonction pour envoyer une notification par SMS via la passerelle Free SMS
+send_sms_notification() {
+    local message="$1"
+    echo "$1"
+    curl -k --get --data-urlencode "msg=$message" "https://smsapi.free-mobile.fr/sendmsg?user=$FREE_MOBILE_USER&pass=$FREE_MOBILE_CODE_AUTH"
+}
+
+show_help() {
+cat << EOF
+Usage : sudo /usr/local/bin/backup [options]
+
+Ce script effectue une sauvegarde complète du serveur en utilisant BorgBackup
+et peut sauvegarder les conteneurs Docker. Il peut également envoyer des notifications
+par SMS via la passerelle Free Mobile.
+
+OPTIONS :
+-h, -?       Affiche cette aide et quitte.
+
+VARIABLES IMPORTANTES (à configurer dans le script) :
+SOURCE_DIR           Répertoire source à sauvegarder (ex: /)
+DEST_DIR             Répertoire de destination pour les sauvegardes Borg (ex: /var/backup)
+MOUNT_POINT          Point de montage du NAS (ex: /var/backup)
+NAS_SERVER           Adresse du serveur NAS
+CONFIG_FILE          Fichier de configuration chiffré pour le montage CIFS (ex: /etc/backup_script/smb.conf)
+BORG_PASSPHRASE      Mot de passe pour Borg Backup
+DOCKER               1 = Sauvegarde Docker activée, 0 = désactivée
+BACKUP_DOCKER        Répertoire où seront stockées les sauvegardes Docker (ex: /var/backups/docker/)
+
+NOTIFICATIONS SMS :
+FREE_MOBILE_USER     Identifiant Free Mobile
+FREE_MOBILE_CODE_AUTH Code d'authentification Free Mobile
+PHONE_NUMBER         Numéro de téléphone destinataire des notifications
+
+FONCTIONNALITÉS DU SCRIPT :
+- Monte le NAS si nécessaire
+- Vérifie et installe BorgBackup et cifs-utils si nécessaire
+- Sauvegarde les conteneurs Docker si activé
+- Effectue la sauvegarde complète avec BorgBackup
+- Supprime les anciennes sauvegardes Docker (>10 jours)
+- Supprime les anciennes sauvegardes Borg (>40 jours)
+- Démonte le NAS après la sauvegarde
+- Envoie des notifications SMS en fonction des résultats
+
+EXEMPLE D'UTILISATION :
+sudo /usr/local/bin/backup          # Lance la sauvegarde
+sudo /usr/local/bin/backup -h       # Affiche l'aide
+EOF
+}
+
+backup_docker(){
+
+    if [ "$DOCKER" -eq "1" ]; then
+
+        # Verification de la présence du dossier de sauvegarde
+        if [ ! -d $BACKUP_DOCKER ]; then 
+            mkdir -p $BACKUP_DOCKER
+        fi
+        
+        # Verification de la présence de Docker
+        if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+        log_message "Docker n'est pas installé ou accessible - Skip"
+        return 1
+        fi
+
+        # Variable d'affichage du containeur en cours d'export
+        containers=$(docker ps -q)
+        if [ -z "$containers" ]; then
+            total=$(echo "$containers" | wc -l)
+            count=0
+            
+            # Sauvegarde des dockers dans un tar.gz
+
+            for id in $(docker ps -q); do
+                count=$((count+1))
+
+                [ -n "$id" ] || continue
+                name="$(docker inspect --format='{{.Name}}' "$id" 2>/dev/null)"
+                name="${name#/}"
+                [ -n "$name" ] || name="$id"
+
+                outfile="$BACKUP_DOCKER/${name}.tar.gz"
+                log_message "Export de $name ($id)"
+
+                echo "[$count/$total] Export de $name..."
+                docker export "$id" | gzip -9 >"$outfile"
+                if [ $? -eq 0 ]; then
+                    log_message "Export de $name OK"
+                    echo "[$count/$total] ✅ $name exporté"
+                else
+                    log_message "Problème lors de l'export de $name"
+                    echo "[$count/$total] ❌ $name erreur"
+                    error="2"
+                fi
+            done
+        fi
+
+        # Suppression des anciennes sauvegardes
+        if ! find "$BACKUP_DOCKER" -maxdepth 1 -type f -mtime +10 -exec rm {} \; 2>/dev/null; then
+            error="3"
+        fi
+
+        # Si une erreur est présente alors on return la valeur de l'erreur si non on retourne 0
+        if [ "$error" -ne "0" ]; then
+            return "$error"
+        else
+            return 0
+        fi 
+
+    else
+        log_message "Aucune sauvegarde Docker demandée"
+        return 10
+    fi
+}
+
+return_backup_docker(){
+    RET=$?  # récupère le code de retour de la fonction
+
+    case $RET in
+        0)
+            echo "✅ Sauvegarde Docker terminée avec succès"
+            log_message "✅ Sauvegarde Docker terminée avec succès"
+            send_sms_notification "[$NAME_FOR_NOTIFY] Sauvegarde Docker terminée avec succès"
+            ;;
+        1)
+            echo "⚠️ Docker n’est pas installé ou le daemon n’est pas accessible"
+            log_message "⚠️ Docker n’est pas installé ou le daemon n’est pas accessible"
+            send_sms_notification "[$NAME_FOR_NOTIFY] Docker n’est pas installé ou le daemon n’est pas accessible"
+            ;;
+        2)
+            echo "❌ Problème pendant l’export d’un conteneur Docker"
+            log_message "❌ Problème pendant l’export d’un conteneur Docker"
+            send_sms_notification "[$NAME_FOR_NOTIFY] Problème pendant l’export d’un conteneur Docker"
+            ;;
+        3)
+            echo "⚠️ Problème lors de la suppression des anciens backups ou rien à supprimer"
+            log_message "⚠️ Problème lors de la suppression des anciens backups ou rien à supprimer"
+            send_sms_notification "[$NAME_FOR_NOTIFY] Problème lors de la suppression des anciens backups ou rien à supprimer"
+            ;;
+        10)
+            echo "ℹ️ Pas de sauvegarde demandée"
+            log_message "ℹ️ Pas de sauvegarde demandée"
+            send_sms_notification "[$NAME_FOR_NOTIFY] Pas de sauvegarde demandée"
+            ;;
+        *)
+            echo "❌ Code inconnu : $RET"
+            log_message "❌ Code inconnu : $RET"
+            send_sms_notification "[$NAME_FOR_NOTIFY] Code inconnu : $RET - Erreur particulière"
+            ;;
+    esac
+}
+
+borg_inst(){
+    if dpkg -l | grep -q borgbackup; then
+    log_message "Borg est déjà installé."
+    else
+    log_message "Borg n'est pas installé. Installation en cours..."
+    sudo apt install borgbackup --yes
+    fi
+}
+
+mountcifs(){
+    if dpkg -l | grep -q cifs-utils; then
+        log_message "outils CIFS déjà installé"
+    else
+        log_message "Installation des outils CIFS"
+        sudo apt install cifs-utils --yes
+    fi
+}
+
+################ Debut du script #################
+
+# Si l'option d'aide est spécifiée, affiche l'aide et quitte
+if [ "$SHOW_HELP" = true ]; then
+    show_help
+    exit 0
+fi
+
+# Vérifiez si le point de montage est déjà monté
+if ! mountpoint -q "$MOUNT_POINT"; then
+    log_message "vérification que cifs-tools soit installé"
+    mountcifs
+    # Le point de montage n'est pas déjà monté, montez-le
+    log_message "Montage du NAS en cours."
+    sudo mount -t cifs -o credentials="$CONFIG_FILE" "//"$NAS_SERVER"/Backup/$NAME_FOR_NOTIFY" "$MOUNT_POINT"
+    log_message "Résultat du montage : $?"
+    # Vérifiez si le point de montage a réussi
+    if mountpoint -q "$MOUNT_POINT"; then
+        mount_success="1"
+    fi
+fi
+
+# Lancement sauvegarde Docker en cours :
+
+#backup_docker
+#return_backup_docker
+
+# Si le point de montage est monté, procédez à la sauvegarde avec Borg Backup
+if mountpoint -q "$MOUNT_POINT"; then
+
+    # Effectue la sauvegarde en utilisant Borg Backup
+    log_message "Démarrage de la sauvegarde avec Borg Backup."
+    borg_inst
+
+    # Exclu les conteneurs actifs si l'option docker est a 1
+    if [ "$DOCKER" -eq "1" ]; then
+        for id in $(docker ps -q); do
+            EXCLUDES="$EXCLUDES --exclude '/var/lib/docker/containers/$id/*'"
+        done
+        EXCLUDES="$EXCLUDES --exclude '/var/lib/docker/containers/*/*-json.log'"
+        EXCLUDES="$EXCLUDES --exclude '/var/lib/docker/tmp/*'"
+        EXCLUDES="$EXCLUDES --exclude '/var/lib/docker/overlay2/*/diff/tmp/*'"
+    fi
+
+
+    BORG_PASSPHRASE=$BORG_PASSPHRASE borg create \
+         -s -p --compression zlib $DEST_DIR::`date +"%Y%m%d%H%M%S"` "$SOURCE_DIR" \
+         --exclude '/proc' \
+         --exclude '/dev'  \
+         --exclude '/run'  \
+         --exclude '/temp' \
+         --exclude "$MOUNT_POINT" \
+         --exclude '/sys'  \
+         --exclude-caches  \
+         --exclude '/home/*/.cache/*' \
+         --exclude '/mnt/nas'\
+         $EXCLUDES 
+
+        #  --exclude '/var/lib/docker/containers/*/*-json.log' \
+        #  --exclude '/var/lib/docker/tmp/*' \
+        #  --exclude '/var/lib/docker/overlay2/*/diff/tmp/*'
+
+    # Vérifiez si la sauvegarde avec Borg Backup a réussi
+    if [ $? -eq 0 ]; then
+        backup_success="1"
+    fi
+
+    # Supprime les sauvegardes de plus de 40 jours avec Borg
+    log_message "Nettoyage des anciennes sauvegardes avec Borg Backup."
+    BORG_PASSPHRASE=$BORG_PASSPHRASE borg prune $DEST_DIR --keep-daily=40
+fi
+
+# Démontez le NAS
+if mountpoint -q "$MOUNT_POINT"; then
+    # Démontez le NAS lorsque la sauvegarde est terminée
+    log_message "Démontage du NAS en cours."
+    sudo umount "$MOUNT_POINT" 
+    
+    if mountpoint -q "$MOUNT_POINT"; then
+        umount_success="0"
+    else
+        umount_success="1"
+    fi
+
+    if [ "$umount_success" -eq "1" ]; then
+        send_sms_notification "[$NAME_FOR_NOTIFY] Le NAS a bien été démonté."
+    else
+        send_sms_notification "[$NAME_FOR_NOTIFY] /!\ Un problème est survenu lors du démontage du NAS."
+    fi
+fi
+
+# Envoyer des notifications SMS en fonction de l'état de la sauvegarde et du montage
+if [ "$backup_docker" -eq "1" ]; then
+    send_sms_notification "[$NAME_FOR_NOTIFY] Sauvegarde de Docker terminée avec succès."
+
+elif [ "$mount_success" -eq "1" ]; then
+    send_sms_notification "[$NAME_FOR_NOTIFY] Sauvegarde non effectuée : Point de montage OK."
+
+elif [ "$backup_success" -eq "1" ]; then
+    send_sms_notification "[$NAME_FOR_NOTIFY] Sauvegarde Borg terminée avec succès."
+
+else
+    send_sms_notification "[$NAME_FOR_NOTIFY] Échec de la sauvegarde : Impossible de monter le NAS."
+
+fi
+
+log_message "Sauvegarde terminée. Fin du script."
