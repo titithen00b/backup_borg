@@ -126,23 +126,23 @@ EOF
 }
 
 
-borg_inst() {
-    if dpkg -l | grep -q borgbackup; then
-        log_message "Borg est déjà installé."
-    else
+borg_inst(){
+   if ! command -v borg >/dev/null 2>&1; then
         log_message "Borg n'est pas installé. Installation en cours..."
-        apt-get update -y
-        apt-get install borgbackup -y
+        apt install -y borgbackup >/dev/null 2>&1
+        log_message "Installation de Borg terminée."
+    else
+        log_message "Borg est déjà installé."
     fi
 }
 
-mountcifs() {
-    if dpkg -l | grep -q cifs-utils; then
-        log_message "cifs-utils déjà installé"
+mountcifs(){
+    if ! command -v mount.cifs >/dev/null 2>&1; then
+        log_message "cifs-utils non installé. Installation en cours..."
+        apt install -y cifs-utils >/dev/null 2>&1
+        log_message "Installation de cifs-utils terminée."
     else
-        log_message "Installation de cifs-utils"
-        apt-get update -y
-        apt-get install cifs-utils -y
+        log_message "Outils CIFS déjà installés."
     fi
 }
 
