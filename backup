@@ -69,26 +69,62 @@ send_sms_notification() {
 
 show_help() {
 cat << EOF
-Usage : sudo /usr/local/bin/backup [options]
+=========================================
+        SCRIPT DE SAUVEGARDE BORG
+=========================================
 
-Options :
-  -h, -?    affiche cette aide
+Usage :
+  sudo /usr/local/bin/backup [options]
 
-Variables importantes (à configurer dans le script) :
-  SOURCE_DIR, DEST_DIR, MOUNT_POINT, NAS_SERVER, CONFIG_FILE
-  DOCKER (1|0), BACKUP_DOCKER
-  FREE_MOBILE_USER, FREE_MOBILE_CODE_AUTH, NAME_FOR_NOTIFY
+Options disponibles :
+  -h, -?        Affiche cette aide et quitte
 
-Fonctionnalités :
-  - monte le NAS (CIFS) si nécessaire
-  - installe borgbackup et cifs-utils si manquants
-  - exporte les conteneurs Docker (si activé)
-  - sauvegarde via borg create
-  - prune des anciennes sauvegardes borg
-  - démonte le NAS
-  - envoie des notifications via Free Mobile
+Variables importantes à configurer dans le script :
+  SOURCE_DIR          : Répertoire source à sauvegarder (ex: "/")
+  DEST_DIR            : Répertoire de destination pour Borg (ex: "/var/backup")
+  MOUNT_POINT         : Point de montage local pour le NAS
+  NAS_SERVER          : Adresse IP ou nom du NAS (ex: 192.168.1.100)
+  CONFIG_FILE         : Fichier credentials CIFS pour le montage NAS
+  BORG_PASS_FILE      : Fichier contenant le mot de passe Borg (optionnel)
+  DOCKER              : 1 = sauvegarde Docker activée, 0 = désactivée
+  BACKUP_DOCKER       : Répertoire pour les backups Docker
+  NAME_FOR_NOTIFY     : Nom utilisé dans les notifications SMS
+
+Variables pour notifications Free Mobile (optionnel) :
+  FREE_MOBILE_USER
+  FREE_MOBILE_CODE_AUTH
+  PHONE_NUMBER
+
+Fonctionnalités principales :
+  1. Vérifie que le script est lancé en root.
+  2. Monte le NAS via CIFS si nécessaire, crée le point de montage.
+  3. Installe automatiquement les paquets manquants :
+     - borgbackup
+     - cifs-utils
+  4. Sauvegarde des conteneurs Docker (si activé) dans $BACKUP_DOCKER.
+     - Export en .tar.gz
+     - Suppression des archives >10 jours
+  5. Sauvegarde complète via Borg :
+     - Compression zlib
+     - Exclusions par défaut : /proc, /dev, /run, /temp, /sys, caches utilisateurs, NAS monté, Docker temporaire
+     - Prune automatique des sauvegardes anciennes (keep-daily=40)
+  6. Démonte proprement le NAS à la fin.
+  7. Envoie des notifications via Free Mobile en cas de succès ou d'erreur.
+
+Exemple d'utilisation :
+  sudo /usr/local/bin/backup
+  sudo /usr/local/bin/backup -h
+
+Logs :
+  Toutes les actions sont loggées dans /var/log/backup.log
+
+Notes :
+  - Configurez correctement NAS_SERVER et CONFIG_FILE pour que le montage fonctionne.
+  - DOCKER=1 active l'export des conteneurs Docker.
+  - Le mot de passe Borg peut être stocké dans BORG_PASS_FILE.
 EOF
 }
+
 
 borg_inst() {
     if dpkg -l | grep -q borgbackup; then
